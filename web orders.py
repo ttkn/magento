@@ -21,68 +21,47 @@ from pandas.io.json import json_normalize
 
 oauth = OAuth(client_key, client_secret, resource_owner_key, resource_owner_secret)
 h = {'Content-Type': 'application/json', 'Accept': 'application/json'}
-uri = 'https://modernica.net/shop/api/rest/'
+uri = 'https://modernica.net/shop/api/rest/orders'
 
-def orders_start(pages, startpg, coroutines):
+def orders(uri, pages, startpg):
     # order details producer
+    df_final = pd.DataFrame()
+    def unpk(df):
+        # each item/address in an order is stored in its own JSON
+        print('pg {}. {} pages remaining.'.format(startpg, pages))
+        unpacked = pd.DataFrame()
+        for column in df:
+            # take each JSON and append to new dataframe
+            a = pd.read_json(df[column].to_json(), orient='index')
+            unpacked = unpacked.append(a)
+        return unpacked
+    # main evaluation loop, order details returned from magento's api change for each iteration
     while pages > 0:
         params = {'page':startpg, 'limit':100}
-        o = requests.get(url='https://modernica.net/shop/api/rest/orders/', headers=h, auth=oauth, params=params)
+        o = requests.get(uri, headers=h, auth=oauth, params=params)
         # convert response objects to text for reading into df
         o_t = o.text
         order_details = pd.read_json(o_t, orient='index')
-        # send df to shipping & item coroutines
-        for coroutine in coroutines:
-            coroutine.send(order_details)
+        # sub dataframes for items and addresses
+        # use dict instead of json because of varying lengths. 'ragged array'
+        order_items = pd.DataFrame.from_dict(order_details.order_items.to_dict(), orient='index')
+        address = pd.DataFrame.from_dict(order_details.addresses.to_dict(), orient='index')
+        # extract the nest JSONs from each
+        df_i = unpk(order_items)
+        df_a = unpk(address)
+        # use outer join on the results
+        combine = pd.merge(df_i, df_a, how='outer', left_index=True, right_index=True)
+        df_final = df_final.append(combine)
         startpg += 1
         pages -= 1
-    for coroutine in coroutines:
-        coroutine.close()
+    # filter out empty rows ('None' values in name) and duplicate items (NaN values in base_original_price)
+    df_final = df_final.dropna(subset=['name', 'base_original_price'])
+    return df_final
 
-def items_unpk1(next_coroutine):
-    print('initialize order items unpacking')
-    try:
-        while True:
-            df = (yield)
-            order_items = pd.DataFrame.from_dict(df.order_items.to_dict(), orient='index')
-            next_coroutine.send(order_items)
-    except GeneratorExit:
-        next_coroutine.close()
-        print("=== Done ===")
-
-def items_unpk2(next_coroutine):
-    print('order items unpacking stage 2')
-    try:
-        while True:
-            items = (yield)
-            df = pd.DataFrame()
-            for column in items:
-                a = pd.read_json(items[1].to_json(), orient='index')
-                df = df.append(a)
-        
+orders_complete = orders(uri, 24, 1)
+orders_complete.to_csv('magento orders 2-1-2017.csv')
+order_details.to_csv('magento 2-1-2017.csv')
+# for future extraction: startpg 24 - 2/1/2017
+ 
 products0 = requests.get(url='https://modernica.net/shop/api/rest/products',headers=h, auth=oauth)
 products = products0.json()
-
-# cannot use; magento's order_id does not correspond to order numbers as seen on invoices
-oi = requests.get(url='https://modernica.net/shop/api/rest/orders/order_id/items', headers=h, auth=oauth)
-
-# shipping info
-order_add = pd.read_json(order_details.addresses.to_json(), orient='index')
-add_bill = pd.read_json(order_add[0].to_json(), orient='index')
-add_ship = pd.read_json(order_add[1].to_json(), orient='index')
-
-# order items
-items = pd.DataFrame.from_dict(order_details.order_items.to_dict(), orient='index')
-
-#use dict instead of json because of varying lengths. 'ragged array'
-item1 = pd.read_json(items[0].to_json(), orient='index')
-item1.columns
-item3 = pd.read_json(items[2].to_json(), orient='index')
-
-def extract(df):
-    ix = pd.read_json(df, orient='index')
-    return ix
-
-items.apply(lambda x: x.to_json())
-items.apply(lambda x: pd.read_json(x, orient='index')
-
